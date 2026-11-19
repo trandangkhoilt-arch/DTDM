@@ -113,19 +113,30 @@ describe('TaskFlow AI Worker routes', () => {
     expect(ollamaRequest?.model).toBe('qwen2.5:3b')
   })
 
-  it('uses the Workers AI binding and its native tool-call response shape', async () => {
+  it('uses Workers AI structured JSON to prepare task proposals', async () => {
     const db = new FakeD1()
     let modelName = ''
-    let toolNames: string[] = []
+    let maxTokens: number | undefined
     const ai = {
-      run: vi.fn(async (model: string, input: { tools?: { name: string }[] }) => {
+      run: vi.fn(async (model: string, input: { tools?: unknown[]; max_tokens?: number }) => {
         modelName = model
-        toolNames = input.tools?.map((tool) => tool.name) ?? []
+        maxTokens = input.max_tokens
         return {
-          response: '',
-          tool_calls: [{
-            name: 'propose_create_task',
-            arguments: { title: 'Tạo từ Workers AI', description: 'Đề xuất', priority: 'MEDIUM', due_at: null, category_name: null, subtasks: [] },
+          choices: [{
+            message: {
+              content: JSON.stringify({
+                reply: 'Mình đã chuẩn bị đề xuất.',
+                actions: [{
+                  type: 'create_task',
+                  title: 'Tạo từ Workers AI',
+                  description: 'Đề xuất',
+                  priority: 'MEDIUM',
+                  due_at: '',
+                  category_name: '',
+                  subtasks: ['Bước một', 'Bước hai', 'Bước ba', 'Bước bốn', 'Bước năm', 'Bước sáu', 'Bước bảy'],
+                }],
+              }),
+            },
           }],
         }
       }),
@@ -145,8 +156,49 @@ describe('TaskFlow AI Worker routes', () => {
       actions: [expect.objectContaining({ title: 'Tạo từ Workers AI' })],
     })
     expect(modelName).toBe('@cf/openai/gpt-oss-20b')
-    expect(toolNames).toContain('propose_create_task')
+    expect(ai.run.mock.calls[0][1].tools).toBeUndefined()
+    expect(maxTokens).toBe(2048)
+    expect(result.actions[0].subtasks).toHaveLength(7)
     expect(db.batches).toHaveLength(0)
+  })
+
+  it('returns an explicit error instead of a success-shaped blank model response', async () => {
+    const ai = {
+      run: vi.fn(async () => ({ choices: [{ message: { content: '' } }] })),
+    }
+    const response = await request('/api/assistant/chat', new FakeD1(), {
+      authenticated: true,
+      ai,
+      body: { message: 'Tôi nên bắt đầu từ đâu?' },
+    })
+    const result = await response.json() as { error: string }
+
+    expect(response.status).toBe(502)
+    expect(result.error).toContain('AI chưa tạo được nội dung trả lời')
+  })
+
+  it('does not clear task fields when an update proposal uses empty strings for unchanged values', async () => {
+    const ai = {
+      run: vi.fn(async () => ({
+        response: JSON.stringify({
+          reply: 'Đã chuẩn bị đề xuất sửa.',
+          actions: [{ type: 'update_task', task_id: 'task-a', priority: 'HIGH', due_at: '', category_name: '' }],
+        }),
+      })),
+    }
+    const response = await request('/api/assistant/chat', new FakeD1(), {
+      authenticated: true,
+      ai,
+      body: { message: 'Cập nhật ưu tiên công việc ôn thi' },
+    })
+    const result = await response.json() as { actions: Array<Record<string, unknown>> }
+
+    expect(response.status).toBe(200)
+    expect(result.actions).toEqual([
+      expect.objectContaining({ type: 'update_task', task_id: 'task-a', priority: 'HIGH' }),
+    ])
+    expect(result.actions[0]).not.toHaveProperty('due_at')
+    expect(result.actions[0]).not.toHaveProperty('category_id')
   })
 
   it('rejects applying an AI proposal unless the user confirms', async () => {
