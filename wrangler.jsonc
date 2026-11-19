@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "taskflow-db",
-      "database_id": "local-taskflow",
+      "database_id": "02bc1f31-4980-46ea-9f16-f91d1cfc06e8",
       "migrations_dir": "migrations"
     }
   ]
