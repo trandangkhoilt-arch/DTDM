@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Toaster, toast } from 'sonner'
-import { BarChart3, Bell, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, Plus, Search, Settings, Trash2, UserRound, X } from 'lucide-react'
+import { BarChart3, Bell, Bot, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
 
 type User = { id:string; name:string; email:string; created_at:string }
 type Task = { id:string; title:string; description?:string; status:'TODO'|'IN_PROGRESS'|'DONE'; priority:'LOW'|'MEDIUM'|'HIGH'; due_at?:string; category_id?:string; category_name?:string; category_color?:string; subtasks?:Subtask[] }
@@ -45,7 +45,7 @@ function AuthPage({mode}:{mode:'login'|'register'}){
 
 function Protected({children}:{children:ReactNode}){const {user,loading}=useAuth();if(loading)return <div className="loading-page"><span className="spinner"/></div>;if(!user)return <Navigate to="/login" replace/>;return <>{children}</>}
 
-function AppShell({children}:{children:ReactNode}){const {user,logout}=useAuth(),nav=useNavigate(),[open,setOpen]=useState(false);const signOut=async()=>{await logout();nav('/')};return <div className="app-shell"><aside className={`sidebar ${open?'open':''}`}><Logo/><button className="mobile-close" onClick={()=>setOpen(false)}><X/></button><nav>{[['/dashboard','Tổng quan',LayoutDashboard],['/tasks','Công việc của tôi',ClipboardList],['/categories','Danh mục',FolderKanban],['/profile','Hồ sơ',UserRound]].map(([p,l,I]:any)=><NavLink key={p} to={p} onClick={()=>setOpen(false)}><I/><span>{l}</span></NavLink>)}</nav><div className="sidebar-bottom"><NavLink to="/profile"><Settings/><span>Cài đặt</span></NavLink><button onClick={signOut}><LogOut/><span>Đăng xuất</span></button></div></aside>{open&&<button className="drawer-backdrop" onClick={()=>setOpen(false)} aria-label="Đóng menu"/>}<div className="app-main"><header className="topbar"><button className="menu-button" onClick={()=>setOpen(true)}><Menu/></button><div className="top-search"><Search/><input aria-label="Tìm kiếm công việc" placeholder="Tìm kiếm công việc..." onKeyDown={e=>{if(e.key==='Enter')nav('/tasks?search='+encodeURIComponent((e.target as HTMLInputElement).value))}}/></div><button className="btn compact" onClick={()=>nav('/tasks?new=1')}><Plus/><span>Công việc</span></button><Bell className="bell"/><div className="avatar">{user?.name?.[0]?.toUpperCase()}</div></header><main className="content">{children}</main></div></div>}
+function AppShell({children}:{children:ReactNode}){const {user,logout}=useAuth(),nav=useNavigate(),[open,setOpen]=useState(false);const signOut=async()=>{await logout();nav('/')};return <div className="app-shell"><aside className={`sidebar ${open?'open':''}`}><Logo/><button className="mobile-close" onClick={()=>setOpen(false)}><X/></button><nav>{[['/dashboard','Tổng quan',LayoutDashboard],['/tasks','Công việc của tôi',ClipboardList],['/assistant','TaskFlow AI',Bot],['/categories','Danh mục',FolderKanban],['/profile','Hồ sơ',UserRound]].map(([p,l,I]:any)=><NavLink key={p} to={p} onClick={()=>setOpen(false)}><I/><span>{l}</span></NavLink>)}</nav><div className="sidebar-bottom"><NavLink to="/profile"><Settings/><span>Cài đặt</span></NavLink><button onClick={signOut}><LogOut/><span>Đăng xuất</span></button></div></aside>{open&&<button className="drawer-backdrop" onClick={()=>setOpen(false)} aria-label="Đóng menu"/>}<div className="app-main"><header className="topbar"><button className="menu-button" onClick={()=>setOpen(true)}><Menu/></button><div className="top-search"><Search/><input aria-label="Tìm kiếm công việc" placeholder="Tìm kiếm công việc..." onKeyDown={e=>{if(e.key==='Enter')nav('/tasks?search='+encodeURIComponent((e.target as HTMLInputElement).value))}}/></div><button className="btn compact" onClick={()=>nav('/tasks?new=1')}><Plus/><span>Công việc</span></button><Bell className="bell"/><div className="avatar">{user?.name?.[0]?.toUpperCase()}</div></header><main className="content">{children}</main></div></div>}
 
 function Dashboard(){
   const {user}=useAuth(),nav=useNavigate()
@@ -107,8 +107,87 @@ function Profile(){
   return <><div className="page-heading"><div><h1>Hồ sơ cá nhân</h1><p>Thông tin tài khoản và tùy chỉnh.</p></div></div><section className="profile-card"><div className="profile-avatar">{user?.name?.[0]?.toUpperCase()}</div><div className="profile-info"><h2>{user?.name}</h2><p>{user?.email}</p><small>Thành viên từ {user?.created_at?new Date(user.created_at).toLocaleDateString('vi-VN'):''}</small></div></section><form className="profile-form" onSubmit={save}><h2>Thông tin hiển thị</h2><label>Tên hiển thị<input value={name} onChange={e=>setName(e.target.value)} minLength={2} maxLength={80}/></label><label>Email<input value={user?.email||''} disabled/></label>{error&&<div className="form-error">{error}</div>}<button className="btn" disabled={busy}>Lưu thay đổi</button></form><button className="btn ghost logout-profile" onClick={signOut}><LogOut/> Đăng xuất</button></>
 }
 
+type AssistantAction = {
+  type:'create_task'|'update_task'
+  task_id?:string
+  title:string
+  previous_title?:string
+  description?:string
+  priority?:'LOW'|'MEDIUM'|'HIGH'
+  status?:'TODO'|'IN_PROGRESS'|'DONE'
+  due_at?:string|null
+  category_name?:string|null
+  subtasks?:string[]
+}
+type ChatMessage = {id:string;role:'user'|'assistant';content:string}
+
+function assistantActionDetails(action:AssistantAction){
+  if(action.type==='create_task')return [
+    action.description?`Mô tả: ${action.description}`:'Chưa có mô tả',
+    action.category_name?`Danh mục: ${action.category_name}`:null,
+    action.due_at?`Hạn: ${new Date(action.due_at).toLocaleString('vi-VN')}`:'Chưa đặt hạn',
+  ].filter(Boolean) as string[]
+  return [
+    `Công việc: ${action.previous_title||action.title}`,
+    action.title!==action.previous_title?`Tên mới: ${action.title}`:null,
+    action.description!==undefined?`Mô tả mới: ${action.description||'Xóa mô tả'}`:null,
+    action.status?`Trạng thái mới: ${action.status==='TODO'?'Chưa thực hiện':action.status==='IN_PROGRESS'?'Đang thực hiện':'Hoàn thành'}`:null,
+    action.due_at!==undefined?`Hạn mới: ${action.due_at?new Date(action.due_at).toLocaleString('vi-VN'):'Xóa hạn'}`:null,
+    action.category_name!==undefined?`Danh mục mới: ${action.category_name||'Chưa phân loại'}`:null,
+  ].filter(Boolean) as string[]
+}
+
+function AssistantPage(){
+  const {user}=useAuth()
+  const [messages,setMessages]=useState<ChatMessage[]>([{id:'welcome',role:'assistant',content:`Xin chào ${user?.name||'bạn'}! Mình có thể tra cứu công việc, lập kế hoạch hoặc chia nhỏ nhiệm vụ. Mọi thay đổi sẽ cần bạn xác nhận trước khi lưu.`}])
+  const [input,setInput]=useState('')
+  const [pending,setPending]=useState<AssistantAction[]>([])
+  const [busy,setBusy]=useState(false)
+  const [saving,setSaving]=useState(false)
+  const [error,setError]=useState('')
+  const sendMessage=async(text:string)=>{
+    const message=text.trim()
+    if(!message||busy)return
+    const previous=messages.filter(item=>item.id!=='welcome').map(({role,content})=>({role,content}))
+    const next=[...messages,{id:crypto.randomUUID(),role:'user' as const,content:message}]
+    setMessages(next);setInput('');setPending([]);setError('');setBusy(true)
+    try{
+      const result=await api('/api/assistant/chat',{method:'POST',body:JSON.stringify({message,history:previous})})
+      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:result.reply}])
+      setPending(result.actions||[])
+    }catch(err:any){
+      setError(err.message)
+      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:'Mình chưa thể xử lý yêu cầu. Hãy kiểm tra Ollama đang chạy rồi thử lại.'}])
+    }finally{setBusy(false)}
+  }
+  const confirmActions=async()=>{
+    if(!pending.length||saving)return
+    setSaving(true);setError('')
+    try{
+      const result=await api('/api/assistant/actions',{method:'POST',body:JSON.stringify({confirmed:true,actions:pending})})
+      const count=result.saved?.length||pending.length
+      setPending([])
+      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:`Đã lưu ${count} thay đổi vào danh sách công việc của bạn.`}])
+      toast.success(`Đã lưu ${count} đề xuất`)
+    }catch(err:any){setError(err.message);toast.error(err.message)}
+    finally{setSaving(false)}
+  }
+  const examples=['Tóm tắt công việc sắp đến hạn của tôi','Lập kế hoạch ôn thi trong 7 ngày','Chia nhỏ công việc báo cáo Cloudflare']
+  return <section className="assistant-page">
+    <header className="assistant-heading"><div className="assistant-heading-icon"><Sparkles/></div><div><span className="eyebrow">TASKFLOW AI ASSISTANT</span><h1>Trợ lý công việc của bạn</h1><p>Được hỗ trợ bởi Ollama · dữ liệu riêng trong TaskFlow</p></div><span className="assistant-model"><i/> qwen2.5:3b</span></header>
+    <div className="assistant-disclaimer"><Bot size={17}/><span>AI chỉ đọc công việc thuộc tài khoản của bạn. Mọi đề xuất tạo hoặc sửa chỉ được ghi vào D1 sau khi bạn xác nhận.</span></div>
+    <div className="assistant-chat">
+      <div className="assistant-messages" aria-live="polite">{messages.map(item=><div className={`chat-message ${item.role}`} key={item.id}><span className="chat-avatar">{item.role==='assistant'?<Sparkles size={16}/>:user?.name?.[0]?.toUpperCase()}</span><div className="chat-bubble"><span className="chat-sender">{item.role==='assistant'?'TaskFlow AI':'Bạn'}</span><p>{item.content}</p></div></div>)}{busy&&<div className="chat-message assistant"><span className="chat-avatar"><Sparkles size={16}/></span><div className="chat-bubble"><span className="chat-sender">TaskFlow AI</span><p className="typing-indicator"><i/><i/><i/> Đang suy nghĩ…</p></div></div>}</div>
+      {!pending.length&&messages.length===1&&<div className="assistant-suggestions">{examples.map(text=><button key={text} onClick={()=>sendMessage(text)}>{text}<span>→</span></button>)}</div>}
+      {!!pending.length&&<section className="proposal-card"><div className="proposal-heading"><div><Sparkles size={18}/><div><b>Đề xuất chờ xác nhận</b><small>{pending.length} thay đổi · chưa được lưu</small></div></div><button className="proposal-dismiss" onClick={()=>setPending([])} aria-label="Hủy đề xuất"><X size={18}/></button></div><div className="proposal-list">{pending.map((action,index)=><article className="proposal-item" key={`${action.type}-${action.task_id||index}-${index}`}><span className={`proposal-kind ${action.type}`}>{action.type==='create_task'?'Tạo mới':'Cập nhật'}</span><div><b>{action.type==='update_task'&&action.title!==action.previous_title?`Đổi tên: ${action.title}`:action.title}</b><small>{assistantActionDetails(action).join(' · ')}</small>{action.subtasks?.length?<ul>{action.subtasks.map((task,index)=><li key={`${task}-${index}`}>{task}</li>)}</ul>:null}</div>{action.priority&&<span className={`priority ${action.priority.toLowerCase()}`}>{action.priority==='HIGH'?'Cao':action.priority==='LOW'?'Thấp':'Trung bình'}</span>}</article>)}</div><div className="proposal-footer"><span>Chỉ bấm xác nhận nếu nội dung đúng ý bạn.</span><button className="btn" onClick={confirmActions} disabled={saving}>{saving?'Đang lưu…':<><Check size={17}/> Xác nhận và lưu</>}</button></div></section>}
+      {error&&<div className="assistant-error" role="alert">{error}<button onClick={()=>setError('')} aria-label="Đóng"><X size={16}/></button></div>}
+      <form className="assistant-composer" onSubmit={event=>{event.preventDefault();void sendMessage(input)}}><textarea value={input} onChange={event=>setInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();void sendMessage(input)}}} placeholder="Hỏi về công việc hoặc mô tả kế hoạch của bạn…" maxLength={3000} rows={2} aria-label="Tin nhắn cho TaskFlow AI"/><div><small>Enter để gửi · Shift+Enter xuống dòng</small><button className="btn" disabled={busy||!input.trim()} aria-label="Gửi tin nhắn"><Send size={17}/><span>Gửi</span></button></div></form>
+    </div>
+  </section>
+}
+
 function NotFound(){return <div className="not-found"><span>404</span><h1>Không tìm thấy trang</h1><Link className="btn" to="/dashboard">Về Dashboard</Link></div>}
 
 export default function App(){
-  return <BrowserRouter><AuthProvider><Toaster position="top-right" richColors/><Routes><Route path="/" element={<Landing/>}/><Route path="/login" element={<AuthPage mode="login"/>}/><Route path="/register" element={<AuthPage mode="register"/>}/><Route path="/dashboard" element={<Protected><AppShell><Dashboard/></AppShell></Protected>}/><Route path="/tasks" element={<Protected><AppShell><Tasks/></AppShell></Protected>}/><Route path="/tasks/:id" element={<Protected><AppShell><TaskDetail/></AppShell></Protected>}/><Route path="/categories" element={<Protected><AppShell><Categories/></AppShell></Protected>}/><Route path="/profile" element={<Protected><AppShell><Profile/></AppShell></Protected>}/><Route path="*" element={<NotFound/>}/></Routes></AuthProvider></BrowserRouter>
+  return <BrowserRouter><AuthProvider><Toaster position="top-right" richColors/><Routes><Route path="/" element={<Landing/>}/><Route path="/login" element={<AuthPage mode="login"/>}/><Route path="/register" element={<AuthPage mode="register"/>}/><Route path="/dashboard" element={<Protected><AppShell><Dashboard/></AppShell></Protected>}/><Route path="/tasks" element={<Protected><AppShell><Tasks/></AppShell></Protected>}/><Route path="/tasks/:id" element={<Protected><AppShell><TaskDetail/></AppShell></Protected>}/><Route path="/assistant" element={<Protected><AppShell><AssistantPage/></AppShell></Protected>}/><Route path="/categories" element={<Protected><AppShell><Categories/></AppShell></Protected>}/><Route path="/profile" element={<Protected><AppShell><Profile/></AppShell></Protected>}/><Route path="*" element={<NotFound/>}/></Routes></AuthProvider></BrowserRouter>
 }
