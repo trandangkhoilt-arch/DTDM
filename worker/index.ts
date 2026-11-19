@@ -2,7 +2,13 @@ import { Hono } from 'hono'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { HTTPException } from 'hono/http-exception'
 
-type Bindings = { DB: D1Database; ASSETS: Fetcher; OLLAMA_BASE_URL?: string; OLLAMA_MODEL?: string }
+type AIMessage = { role: 'system' | 'user' | 'assistant'; content: string }
+type AITool = { name: string; description: string; parameters: Record<string, unknown> }
+type AIResult = { response?: string; tool_calls?: { name?: string; arguments?: unknown }[] }
+type WorkersAI = {
+  run(model: string, input: { messages: AIMessage[]; tools?: AITool[]; temperature?: number; max_tokens?: number }): Promise<AIResult>
+}
+type Bindings = { DB: D1Database; ASSETS: Fetcher; AI?: WorkersAI; AI_MODE?: string; OLLAMA_BASE_URL?: string; OLLAMA_MODEL?: string; AI_MODEL?: string }
 type Variables = { userId: string }
 type AppEnv = { Bindings: Bindings; Variables: Variables }
 
@@ -341,13 +347,11 @@ app.patch('/api/profile', async (c) => {
   return c.json({ ok: true })
 })
 
-const assistantTools = [
+const assistantTools: AITool[] = [
   {
-    type: 'function',
-    function: {
-      name: 'propose_create_task',
-      description: 'Đề xuất tạo một công việc mới. Không lưu công việc; đây chỉ là đề xuất chờ người dùng xác nhận.',
-      parameters: {
+    name: 'propose_create_task',
+    description: 'Đề xuất tạo một công việc mới. Không lưu công việc; đây chỉ là đề xuất chờ người dùng xác nhận.',
+    parameters: {
         type: 'object',
         properties: {
           title: { type: 'string', description: 'Tiêu đề công việc, tối đa 150 ký tự' },
@@ -358,15 +362,12 @@ const assistantTools = [
           subtasks: { type: 'array', items: { type: 'string' }, description: 'Danh sách tối đa 10 bước nhỏ' },
         },
         required: ['title', 'description', 'priority', 'due_at', 'category_name', 'subtasks'],
-      },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'propose_update_task',
-      description: 'Đề xuất cập nhật công việc hiện có hoặc thêm các bước nhỏ. Chỉ dùng task_id trong dữ liệu công việc đã cung cấp. Không lưu thay đổi.',
-      parameters: {
+    name: 'propose_update_task',
+    description: 'Đề xuất cập nhật công việc hiện có hoặc thêm các bước nhỏ. Chỉ dùng task_id trong dữ liệu công việc đã cung cấp. Không lưu thay đổi.',
+    parameters: {
         type: 'object',
         properties: {
           task_id: { type: 'string' },
@@ -379,25 +380,21 @@ const assistantTools = [
           subtasks: { type: 'array', items: { type: 'string' }, description: 'Danh sách bước nhỏ cần thêm vào công việc' },
         },
         required: ['task_id'],
-      },
     },
   },
   {
-    type: 'function',
-    function: {
-      name: 'propose_split_task',
-      description: 'Đề xuất thêm checklist cho một công việc có sẵn. Không lưu thay đổi.',
-      parameters: {
+    name: 'propose_split_task',
+    description: 'Đề xuất thêm checklist cho một công việc có sẵn. Không lưu thay đổi.',
+    parameters: {
         type: 'object',
         properties: {
           task_title: { type: 'string', description: 'Sao chép chính xác tiêu đề công việc có sẵn' },
           subtasks: { type: 'array', items: { type: 'string' }, description: 'Các bước nhỏ, cụ thể và có thể hoàn thành' },
         },
         required: ['task_title', 'subtasks'],
-      },
     },
   },
-] as const
+]
 
 function validDueDate(value: unknown): string | null | undefined {
   if (value === undefined) return undefined
@@ -452,38 +449,67 @@ app.post('/api/assistant/chat', async (c) => {
       : asksToUpdate
         ? assistantTools.slice(1)
         : []
+  const messages: AIMessage[] = [{ role: 'system', content: system }, ...history, { role: 'user', content: message }]
+  let modelMessage: { content?: string; tool_calls?: { function?: { name?: string; arguments?: unknown }; name?: string; arguments?: unknown }[] }
+  let model: string
+  let provider: 'workers-ai' | 'ollama'
 
-  const baseUrl = (c.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '')
-  let response: Response
-  try {
-    response = await fetch(`${baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      signal: AbortSignal.timeout(240_000),
-      body: JSON.stringify({
-        model: c.env.OLLAMA_MODEL || 'qwen2.5:3b',
-        stream: false,
+  if (c.env.AI && c.env.AI_MODE !== 'ollama') {
+    model = c.env.AI_MODEL || '@cf/openai/gpt-oss-20b'
+    provider = 'workers-ai'
+    try {
+      const result = await c.env.AI.run(model, {
+        messages,
         ...(tools.length ? { tools } : {}),
-        messages: [{ role: 'system', content: system }, ...history, { role: 'user', content: message }],
-        options: { temperature: 0.2, num_predict: 256 },
-      }),
-    })
-  } catch (error) {
-    console.error('Ollama request failed', error)
-    return c.json({ error: 'Không kết nối được Ollama. Hãy kiểm tra Ollama đang chạy tại localhost:11434.' }, 503)
+        temperature: 0.2,
+        max_tokens: 256,
+      })
+      modelMessage = {
+        content: result.response,
+        tool_calls: result.tool_calls,
+      }
+    } catch (error) {
+      console.error('Workers AI request failed', error)
+      return c.json({ error: 'Cloudflare Workers AI tạm thời không khả dụng. Vui lòng thử lại sau.' }, 502)
+    }
+  } else {
+    const baseUrl = (c.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '')
+    model = c.env.OLLAMA_MODEL || 'qwen2.5:3b'
+    provider = 'ollama'
+    let response: Response
+    try {
+      response = await fetch(`${baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: AbortSignal.timeout(240_000),
+        body: JSON.stringify({
+          model,
+          stream: false,
+          ...(tools.length ? { tools: tools.map((tool) => ({ type: 'function', function: tool })) } : {}),
+          messages,
+          options: { temperature: 0.2, num_predict: 256 },
+        }),
+      })
+    } catch (error) {
+      console.error('Ollama request failed', error)
+      return c.json({ error: 'Không kết nối được Ollama. Hãy kiểm tra Ollama đang chạy tại localhost:11434.' }, 503)
+    }
+    if (!response.ok) {
+      console.error('Ollama returned an error', response.status)
+      return c.json({ error: `Ollama trả về lỗi HTTP ${response.status}` }, 502)
+    }
+    const result = await response.json<any>()
+    if (!result?.message || typeof result.message !== 'object') return c.json({ error: 'Ollama trả về phản hồi không hợp lệ' }, 502)
+    modelMessage = result.message
   }
-  if (!response.ok) {
-    console.error('Ollama returned an error', response.status)
-    return c.json({ error: `Ollama trả về lỗi HTTP ${response.status}` }, 502)
-  }
-  const result = await response.json<any>()
-  const modelMessage = result?.message
-  if (!modelMessage || typeof modelMessage !== 'object') return c.json({ error: 'Ollama trả về phản hồi không hợp lệ' }, 502)
 
   const actions: Record<string, unknown>[] = []
   for (const call of Array.isArray(modelMessage.tool_calls) ? modelMessage.tool_calls.slice(0, 5) : []) {
-    const name = call?.function?.name
-    const args = call?.function?.arguments
+    const name = call?.function?.name ?? call?.name
+    let args = call?.function?.arguments ?? call?.arguments
+    if (typeof args === 'string') {
+      try { args = JSON.parse(args) } catch { continue }
+    }
     if (!args || typeof args !== 'object') continue
     const subtasks = Array.isArray(args.subtasks)
       ? args.subtasks.slice(0, 10).map((title: unknown) => typeof title === 'string' ? title.trim().slice(0, 150) : '').filter(Boolean)
@@ -540,7 +566,8 @@ app.post('/api/assistant/chat', async (c) => {
         ? 'Mình đã chuẩn bị đề xuất bên dưới. Xem lại rồi xác nhận nếu bạn muốn lưu vào TaskFlow.'
         : 'Mình có thể giúp tra cứu công việc, lập kế hoạch hoặc chia nhỏ nhiệm vụ. Bạn muốn bắt đầu từ đâu?',
     actions,
-    model: c.env.OLLAMA_MODEL || 'qwen2.5:3b',
+    model,
+    provider,
   })
 })
 

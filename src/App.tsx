@@ -145,6 +145,7 @@ function AssistantPage(){
   const [busy,setBusy]=useState(false)
   const [saving,setSaving]=useState(false)
   const [error,setError]=useState('')
+  const [modelLabel,setModelLabel]=useState(import.meta.env.DEV?'Ollama · qwen2.5:3b':'Workers AI · gpt-oss-20b')
   const sendMessage=async(text:string)=>{
     const message=text.trim()
     if(!message||busy)return
@@ -153,11 +154,12 @@ function AssistantPage(){
     setMessages(next);setInput('');setPending([]);setError('');setBusy(true)
     try{
       const result=await api('/api/assistant/chat',{method:'POST',body:JSON.stringify({message,history:previous})})
+      setModelLabel(result.provider==='workers-ai'?`Workers AI · ${String(result.model).split('/').at(-1)}`:`Ollama · ${result.model}`)
       setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:result.reply}])
       setPending(result.actions||[])
     }catch(err:any){
       setError(err.message)
-      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:'Mình chưa thể xử lý yêu cầu. Hãy kiểm tra Ollama đang chạy rồi thử lại.'}])
+      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:'Mình chưa thể xử lý yêu cầu. Hãy kiểm tra dịch vụ AI đang hoạt động rồi thử lại.'}])
     }finally{setBusy(false)}
   }
   const confirmActions=async()=>{
@@ -174,7 +176,7 @@ function AssistantPage(){
   }
   const examples=['Tóm tắt công việc sắp đến hạn của tôi','Lập kế hoạch ôn thi trong 7 ngày','Chia nhỏ công việc báo cáo Cloudflare']
   return <section className="assistant-page">
-    <header className="assistant-heading"><div className="assistant-heading-icon"><Sparkles/></div><div><span className="eyebrow">TASKFLOW AI ASSISTANT</span><h1>Trợ lý công việc của bạn</h1><p>Được hỗ trợ bởi Ollama · dữ liệu riêng trong TaskFlow</p></div><span className="assistant-model"><i/> qwen2.5:3b</span></header>
+    <header className="assistant-heading"><div className="assistant-heading-icon"><Sparkles/></div><div><span className="eyebrow">TASKFLOW AI ASSISTANT</span><h1>Trợ lý công việc của bạn</h1><p>AI hỗ trợ lập kế hoạch · dữ liệu riêng trong TaskFlow</p></div><span className="assistant-model"><i/> {modelLabel}</span></header>
     <div className="assistant-disclaimer"><Bot size={17}/><span>AI chỉ đọc công việc thuộc tài khoản của bạn. Mọi đề xuất tạo hoặc sửa chỉ được ghi vào D1 sau khi bạn xác nhận.</span></div>
     <div className="assistant-chat">
       <div className="assistant-messages" aria-live="polite">{messages.map(item=><div className={`chat-message ${item.role}`} key={item.id}><span className="chat-avatar">{item.role==='assistant'?<Sparkles size={16}/>:user?.name?.[0]?.toUpperCase()}</span><div className="chat-bubble"><span className="chat-sender">{item.role==='assistant'?'TaskFlow AI':'Bạn'}</span><p>{item.content}</p></div></div>)}{busy&&<div className="chat-message assistant"><span className="chat-avatar"><Sparkles size={16}/></span><div className="chat-bubble"><span className="chat-sender">TaskFlow AI</span><p className="typing-indicator"><i/><i/><i/> Đang suy nghĩ…</p></div></div>}</div>

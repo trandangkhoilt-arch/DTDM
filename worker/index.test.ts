@@ -58,7 +58,7 @@ class FakeD1 {
   }
 }
 
-function request(path: string, db: FakeD1, options: { body?: unknown; authenticated?: boolean } = {}) {
+function request(path: string, db: FakeD1, options: { body?: unknown; authenticated?: boolean; ai?: unknown } = {}) {
   const headers = new Headers()
   if (options.body !== undefined) headers.set('Content-Type', 'application/json')
   if (options.authenticated) headers.set('Cookie', 'taskflow_session=test-session')
@@ -68,7 +68,7 @@ function request(path: string, db: FakeD1, options: { body?: unknown; authentica
       headers,
       body: options.body === undefined ? undefined : JSON.stringify(options.body),
     }),
-    { DB: db } as never,
+    { DB: db, AI: options.ai } as never,
     {} as never,
   )
 }
@@ -111,6 +111,42 @@ describe('TaskFlow AI Worker routes', () => {
     expect(db.reads.some(({ sql, values }) => sql.includes('FROM tasks') && values[0] === 'user-a')).toBe(true)
     expect(db.batches).toHaveLength(0)
     expect(ollamaRequest?.model).toBe('qwen2.5:3b')
+  })
+
+  it('uses the Workers AI binding and its native tool-call response shape', async () => {
+    const db = new FakeD1()
+    let modelName = ''
+    let toolNames: string[] = []
+    const ai = {
+      run: vi.fn(async (model: string, input: { tools?: { name: string }[] }) => {
+        modelName = model
+        toolNames = input.tools?.map((tool) => tool.name) ?? []
+        return {
+          response: '',
+          tool_calls: [{
+            name: 'propose_create_task',
+            arguments: { title: 'Tạo từ Workers AI', description: 'Đề xuất', priority: 'MEDIUM', due_at: null, category_name: null, subtasks: [] },
+          }],
+        }
+      }),
+    }
+
+    const response = await request('/api/assistant/chat', db, {
+      authenticated: true,
+      ai,
+      body: { message: 'Tạo task mới' },
+    })
+    const result = await response.json() as { actions: Array<{ title: string }>; provider: string; model: string }
+
+    expect(response.status).toBe(200)
+    expect(result).toMatchObject({
+      provider: 'workers-ai',
+      model: '@cf/openai/gpt-oss-20b',
+      actions: [expect.objectContaining({ title: 'Tạo từ Workers AI' })],
+    })
+    expect(modelName).toBe('@cf/openai/gpt-oss-20b')
+    expect(toolNames).toContain('propose_create_task')
+    expect(db.batches).toHaveLength(0)
   })
 
   it('rejects applying an AI proposal unless the user confirms', async () => {
