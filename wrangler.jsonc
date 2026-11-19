@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "taskflow",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-09-06",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "taskflow-db",
+      "database_id": "local-taskflow",
+      "migrations_dir": "migrations"
+    }
+  ]
+}
