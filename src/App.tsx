@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useRef, useState, Fr
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Toaster, toast } from 'sonner'
 import { AssistantReply } from './AssistantReply'
-import { BarChart3, Bell, Bot, Repeat2, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, MessageSquareText, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
+import { ArrowUpRight, BarChart3, Bell, Bot, ChevronDown, Repeat2, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, MessageSquareText, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
 
 type User = { id:string; name:string; email:string; created_at:string }
 type Task = { id:string; title:string; description?:string; status:'TODO'|'IN_PROGRESS'|'DONE'; priority:'LOW'|'MEDIUM'|'HIGH'; due_at?:string; category_id?:string; category_name?:string; category_color?:string; subtasks?:Subtask[] }
@@ -172,6 +172,12 @@ function AssistantPage(){
   const [conversationId,setConversationId]=useState<string|null>(null)
   const [pendingMessageId,setPendingMessageId]=useState<string|null>(null)
   const [historyLoading,setHistoryLoading]=useState(true)
+  const [historyExpanded,setHistoryExpanded]=useState(false)
+  const messageList=useRef<HTMLDivElement>(null)
+  useEffect(()=>{
+    const list=messageList.current
+    if(list)list.scrollTop=list.scrollHeight
+  },[messages])
   const [input,setInput]=useState('')
   const [pending,setPending]=useState<AssistantAction[]>([])
   const [busy,setBusy]=useState(false)
@@ -223,11 +229,13 @@ function AssistantPage(){
       const result=await api(`/api/assistant/conversations/${id}/messages`)
       selectConversation(id)
       restoreMessages(result.messages)
+      setHistoryExpanded(false)
       setInput('')
     }catch(err:any){setError(err.message)}
     finally{setBusy(false)}
   }
   const startConversation=()=>{
+    setHistoryExpanded(false)
     selectConversation(null);setPending([]);setPendingMessageId(null);setError('');setInput('')
     setMessages([{id:'welcome',role:'assistant',content:`Xin chào ${user?.name||'bạn'}! Mình có thể tra cứu công việc, lập kế hoạch hoặc chia nhỏ nhiệm vụ. Mọi thay đổi sẽ cần bạn xác nhận trước khi lưu.`}])
   }
@@ -303,14 +311,55 @@ function AssistantPage(){
     }catch(err:any){setError(err.message)}
     finally{setSaving(false)}
   }
-  const examples=['Tóm tắt công việc sắp đến hạn của tôi','Lập kế hoạch ôn thi trong 7 ngày','Chia nhỏ công việc báo cáo Cloudflare']
+  const examples=[
+    { label:'Xem việc sắp đến hạn', prompt:'Tóm tắt công việc sắp đến hạn của tôi' },
+    { label:'Lập kế hoạch ôn thi', prompt:'Lập kế hoạch ôn thi trong 7 ngày' },
+    { label:'Chia nhỏ một công việc', prompt:'Chia nhỏ công việc báo cáo Cloudflare' },
+  ]
+  const currentConversation=conversations.find(item=>item.id===conversationId)
+  const showSuggestions=!historyLoading&&messages[0]?.id==='welcome'&&!busy
   return <section className="assistant-page">
-    <header className="assistant-heading"><div className="assistant-heading-icon"><Sparkles/></div><div><span className="eyebrow">TASKFLOW AI ASSISTANT</span><h1>Trợ lý công việc của bạn</h1><p>AI hỗ trợ lập kế hoạch · dữ liệu riêng trong TaskFlow</p></div><span className="assistant-model"><i/> {modelLabel}</span></header>
-    <div className="assistant-disclaimer"><Bot size={17}/><span>AI chỉ đọc công việc thuộc tài khoản của bạn. Mọi đề xuất tạo hoặc sửa chỉ được ghi vào D1 sau khi bạn xác nhận.</span></div>
-    <div className="assistant-layout"><aside className="assistant-history"><button className="assistant-new-chat" onClick={startConversation} disabled={blocked}><Plus size={16}/> Cuộc trò chuyện mới</button><span className="assistant-history-label">LỊCH SỬ TRÒ CHUYỆN</span>{historyLoading?<div className="assistant-history-empty">Đang tải…</div>:conversations.length?conversations.map(item=><button key={item.id} className={`assistant-history-item ${conversationId===item.id?'active':''}`} onClick={()=>openConversation(item.id)} disabled={blocked}><MessageSquareText size={16}/><span><b>{item.title}</b><small>{new Date(item.updated_at).toLocaleString('vi-VN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} · {item.message_count} tin nhắn</small></span></button>):<div className="assistant-history-empty">Các cuộc trò chuyện của bạn sẽ hiển thị ở đây.</div>}</aside><div className="assistant-chat">
+    <header className="assistant-heading">
+      <div className="assistant-heading-icon"><Sparkles aria-hidden="true"/></div>
+      <div><h1>TaskFlow AI</h1><p>Lập kế hoạch và quản lý công việc bằng hội thoại.</p></div>
+      <span className="assistant-model">{modelLabel}</span>
+    </header>
+    <div className="assistant-layout">
+      <aside className="assistant-history" aria-label="Lịch sử trò chuyện">
+        <div className="assistant-history-toolbar">
+          <h2>Lịch sử trò chuyện</h2>
+          <button type="button" className="assistant-history-toggle" aria-expanded={historyExpanded} aria-controls="assistant-history-list" onClick={()=>setHistoryExpanded(value=>!value)}>
+            Lịch sử <ChevronDown size={16} aria-hidden="true"/>
+          </button>
+          <button type="button" className="assistant-new-chat" onClick={startConversation} disabled={blocked}>
+            <Plus size={17} aria-hidden="true"/> Trò chuyện mới
+          </button>
+        </div>
+        <div id="assistant-history-list" className={`assistant-history-list ${historyExpanded?'expanded':''}`} aria-busy={historyLoading}>
+          {historyLoading?<p className="assistant-history-empty" role="status">Đang tải lịch sử…</p>
+            :conversations.length?conversations.map(item=><button
+              type="button" key={item.id} className={`assistant-history-item ${conversationId===item.id?'active':''}`}
+              onClick={()=>openConversation(item.id)} disabled={blocked}
+              aria-current={conversationId===item.id?'true':undefined} title={item.title}>
+              <span className="assistant-history-icon"><MessageSquareText size={16} aria-hidden="true"/></span>
+              <span className="assistant-history-copy">
+                <strong>{item.title}</strong>
+                <small>{new Date(item.updated_at).toLocaleString('vi-VN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} · {item.message_count} tin nhắn</small>
+              </span>
+            </button>):<p className="assistant-history-empty">Chưa có cuộc trò chuyện nào.</p>}
+        </div>
+      </aside>
+      <div className="assistant-chat">
+        <header className="assistant-chat-header">
+          <span className="assistant-chat-header-icon"><MessageSquareText size={18} aria-hidden="true"/></span>
+          <div><h2 title={currentConversation?.title}>{currentConversation?.title||'Cuộc trò chuyện mới'}</h2>
+          <p>Công việc chỉ được lưu sau khi bạn xác nhận.</p></div>
+        </header>
+        <div className="assistant-chat-stream" ref={messageList}>
       <div className="assistant-messages" aria-live="polite">{messages.map(item=><div className={`chat-message ${item.role}`} key={item.id}><span className="chat-avatar">{item.role==='assistant'?<Sparkles size={16}/>:user?.name?.[0]?.toUpperCase()}</span><div className="chat-bubble"><span className="chat-sender">{item.role==='assistant'?'TaskFlow AI':'Bạn'}</span>{item.role==='assistant'?<AssistantReply content={item.content}/>:<p>{item.content}</p>}{item.actions?.length?<div className="chat-proposal-history"><span className={`proposal-history-status ${item.proposal_status||'pending'}`}>{item.proposal_status==='confirmed'?'Đã xác nhận và lưu':item.proposal_status==='dismissed'?'Đã hủy':'Đề xuất chờ xác nhận'}</span>{item.actions.map((action,index)=><div key={`${action.title}-${index}`}><b>{action.title}</b>{action.subtasks?.length?<ul>{action.subtasks.map((subtask,subIndex)=><li key={`${subtask}-${subIndex}`}>{subtask}</li>)}</ul>:null}</div>)}</div>:null}</div></div>)}{busy&&<div className="chat-message assistant"><span className="chat-avatar"><Sparkles size={16}/></span><div className="chat-bubble"><span className="chat-sender">TaskFlow AI</span><p className="typing-indicator"><i/><i/><i/> Đang suy nghĩ…</p></div></div>}</div>
-      {!pending.length&&messages.length===1&&<div className="assistant-suggestions">{examples.map(text=><button key={text} disabled={blocked} onClick={()=>sendMessage(text)}>{text}<span>→</span></button>)}</div>}
+      {showSuggestions&&<div className="assistant-suggestions">{examples.map(({label,prompt})=><button type="button" key={prompt} disabled={blocked} onClick={()=>sendMessage(prompt)}>{label}<ArrowUpRight size={15} aria-hidden="true"/></button>)}</div>}
       {!!pending.length&&<section className="proposal-card"><div className="proposal-heading"><div><Sparkles size={18}/><div><b>Đề xuất chờ xác nhận</b><small>{pending.length} thay đổi · chưa được lưu</small></div></div><button className="proposal-dismiss" onClick={dismissProposal} disabled={blocked} aria-label="Hủy đề xuất"><X size={18}/></button></div><div className="proposal-list">{pending.map((action,index)=><article className="proposal-item" key={`${action.type}-${action.task_id||index}-${index}`}><span className={`proposal-kind ${action.type}`}>{action.type==='create_task'?'Tạo mới':'Cập nhật'}</span><div><b>{action.type==='update_task'&&action.title!==action.previous_title?`Đổi tên: ${action.title}`:action.title}</b><small>{assistantActionDetails(action).join(' · ')}</small>{action.subtasks?.length?<ul>{action.subtasks.map((task,index)=><li key={`${task}-${index}`}>{task}</li>)}</ul>:null}</div>{action.priority&&<span className={`priority ${action.priority.toLowerCase()}`}>{action.priority==='HIGH'?'Cao':action.priority==='LOW'?'Thấp':'Trung bình'}</span>}</article>)}</div><div className="proposal-footer"><span>Chỉ bấm xác nhận nếu nội dung đúng ý bạn.</span><button className="btn" onClick={confirmActions} disabled={blocked}>{saving?'Đang lưu…':<><Check size={17}/> Xác nhận và lưu</>}</button></div></section>}
+        </div>
       {error&&<div className="assistant-error" role="alert">{error}<button onClick={()=>setError('')} aria-label="Đóng"><X size={16}/></button></div>}
       <form className="assistant-composer" onSubmit={event=>{event.preventDefault();void sendMessage(input)}}><textarea value={input} onChange={event=>setInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();void sendMessage(input)}}} placeholder="Hỏi về công việc hoặc mô tả kế hoạch của bạn…" maxLength={3000} rows={2} aria-label="Tin nhắn cho TaskFlow AI"/><div><small>Enter để gửi · Shift+Enter xuống dòng</small><button className="btn" disabled={blocked||!input.trim()} aria-label="Gửi tin nhắn"><Send size={17}/><span>Gửi</span></button></div></form>
     </div></div>
