@@ -1,8 +1,8 @@
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, Fragment, type ReactNode } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Toaster, toast } from 'sonner'
 import { AssistantReply } from './AssistantReply'
-import { BarChart3, Bell, Bot, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, MessageSquareText, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
+import { BarChart3, Bell, Bot, Repeat2, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, MessageSquareText, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
 
 type User = { id:string; name:string; email:string; created_at:string }
 type Task = { id:string; title:string; description?:string; status:'TODO'|'IN_PROGRESS'|'DONE'; priority:'LOW'|'MEDIUM'|'HIGH'; due_at?:string; category_id?:string; category_name?:string; category_color?:string; subtasks?:Subtask[] }
@@ -17,13 +17,39 @@ async function api(path:string, options:RequestInit={}) {
   return data
 }
 
-const AuthContext=createContext<{user:User|null;loading:boolean;refresh:()=>Promise<void>;logout:()=>Promise<void>}>({user:null,loading:true,refresh:async()=>{},logout:async()=>{}})
+const AuthContext=createContext<{
+  user:User|null
+  loading:boolean
+  refresh:()=>Promise<void>
+  setSessionUser:(user:User|null)=>void
+  logout:()=>Promise<void>
+}>({user:null,loading:true,refresh:async()=>{},setSessionUser:()=>{},logout:async()=>{}})
+
 function AuthProvider({children}:{children:ReactNode}) {
   const [user,setUser]=useState<User|null>(null),[loading,setLoading]=useState(true)
-  const refresh=async()=>{try{const d=await api('/api/auth/me');setUser(d.user)}catch{setUser(null)}finally{setLoading(false)}}
-  const logout=async()=>{await api('/api/auth/logout',{method:'POST'});setUser(null)}
-  useEffect(()=>{refresh()},[])
-  return <AuthContext.Provider value={{user,loading,refresh,logout}}>{children}</AuthContext.Provider>
+  const revision=useRef(0)
+  const setSessionUser=(next:User|null)=>{
+    revision.current++
+    setUser(next)
+    setLoading(false)
+  }
+  const refresh=useCallback(async()=>{
+    const current=++revision.current
+    try{
+      const result=await api('/api/auth/me',{cache:'no-store'})
+      if(revision.current===current)setUser(result.user)
+    }catch{
+      if(revision.current===current)setUser(null)
+    }finally{
+      if(revision.current===current)setLoading(false)
+    }
+  },[])
+  const logout=async()=>{
+    await api('/api/auth/logout',{method:'POST'})
+    setSessionUser(null)
+  }
+  useEffect(()=>{void refresh()},[refresh])
+  return <AuthContext.Provider value={{user,loading,refresh,setSessionUser,logout}}>{children}</AuthContext.Provider>
 }
 const useAuth=()=>useContext(AuthContext)
 
@@ -38,15 +64,15 @@ function Landing(){
 }
 
 function AuthPage({mode}:{mode:'login'|'register'}){
-  const {refresh}=useAuth(),nav=useNavigate()
+  const {user,setSessionUser}=useAuth(),nav=useNavigate()
   const [name,setName]=useState(''),[email,setEmail]=useState(''),[password,setPassword]=useState(''),[confirm,setConfirm]=useState(''),[show,setShow]=useState(false),[error,setError]=useState(''),[busy,setBusy]=useState(false)
-  const submit=async(e:any)=>{e.preventDefault();setError('');if(mode==='register'&&password!==confirm)return setError('Mật khẩu xác nhận không khớp');setBusy(true);try{await api(`/api/auth/${mode}`,{method:'POST',body:JSON.stringify(mode==='register'?{name,email,password}:{email,password})});await refresh();toast.success(mode==='register'?'Tạo tài khoản thành công':'Đăng nhập thành công');nav('/dashboard')}catch(err:any){setError(err.message)}finally{setBusy(false)}}
-  return <div className="auth-page"><Link to="/" className="auth-logo"><Logo/></Link><form className="auth-card" onSubmit={submit}><span className="eyebrow">{mode==='login'?'CHÀO MỪNG TRỞ LẠI':'BẮT ĐẦU NGAY'}</span><h1>{mode==='login'?'Đăng nhập vào TaskFlow':'Tạo tài khoản mới'}</h1><p>{mode==='login'?'Tiếp tục quản lý công việc của bạn':'Bắt đầu hành trình hoàn thành mục tiêu'}</p>{mode==='register'&&<label>Họ và tên<input value={name} onChange={e=>setName(e.target.value)} required/></label>}<label>Email<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Mật khẩu<div className="password"><input type={show?'text':'password'} value={password} onChange={e=>setPassword(e.target.value)} required/><button type="button" onClick={()=>setShow(!show)}>{show?'Ẩn':'Hiện'}</button></div></label>{mode==='register'&&<label>Xác nhận mật khẩu<input type={show?'text':'password'} value={confirm} onChange={e=>setConfirm(e.target.value)} required/></label>}<label className="check-label"><input type="checkbox" checked={show} onChange={()=>setShow(!show)} /> Hiển thị mật khẩu</label>{error&&<div className="form-error">{error}</div>}<button className="btn full" disabled={busy}>{busy?'Đang xử lý...':mode==='login'?'Đăng nhập':'Tạo tài khoản'}</button><div className="auth-switch">{mode==='login'?<>Chưa có tài khoản? <Link to="/register">Đăng ký</Link></>:<>Đã có tài khoản? <Link to="/login">Đăng nhập</Link></>}</div></form></div>
+  const submit=async(e:any)=>{e.preventDefault();setError('');if(mode==='register'&&password!==confirm)return setError('Mật khẩu xác nhận không khớp');setBusy(true);try{const result=await api(`/api/auth/${mode}`,{method:'POST',body:JSON.stringify(mode==='register'?{name,email,password}:{email,password})});setSessionUser(result.user);toast.success(mode==='register'?'Tạo tài khoản thành công':'Đăng nhập thành công');nav('/dashboard',{replace:true})}catch(err:any){setError(err.message)}finally{setBusy(false)}}
+  return <div className="auth-page"><Link to="/" className="auth-logo"><Logo/></Link><form className="auth-card" onSubmit={submit}><span className="eyebrow">{mode==='login'?'CHÀO MỪNG TRỞ LẠI':'BẮT ĐẦU NGAY'}</span><h1>{mode==='login'?(user?'Chuyển tài khoản':'Đăng nhập vào TaskFlow'):'Tạo tài khoản mới'}</h1><p>{mode==='login'?'Tiếp tục quản lý công việc của bạn':'Bắt đầu hành trình hoàn thành mục tiêu'}</p>{mode==='register'&&<label>Họ và tên<input value={name} onChange={e=>setName(e.target.value)} required/></label>}<label>Email<input type="email" autoComplete="username" value={email} onChange={e=>setEmail(e.target.value)} required/></label><label>Mật khẩu<div className="password"><input type={show?'text':'password'} autoComplete={mode==='login'?'current-password':'new-password'} value={password} onChange={e=>setPassword(e.target.value)} required/><button type="button" onClick={()=>setShow(!show)}>{show?'Ẩn':'Hiện'}</button></div></label>{mode==='register'&&<label>Xác nhận mật khẩu<input type={show?'text':'password'} value={confirm} onChange={e=>setConfirm(e.target.value)} required/></label>}<label className="check-label"><input type="checkbox" checked={show} onChange={()=>setShow(!show)} /> Hiển thị mật khẩu</label>{error&&<div className="form-error">{error}</div>}<button className="btn full" disabled={busy}>{busy?'Đang xử lý...':mode==='login'?'Đăng nhập':'Tạo tài khoản'}</button><div className="auth-switch">{mode==='login'?<>Chưa có tài khoản? <Link to="/register">Đăng ký</Link></>:<>Đã có tài khoản? <Link to="/login">Đăng nhập</Link></>}</div></form></div>
 }
 
-function Protected({children}:{children:ReactNode}){const {user,loading}=useAuth();if(loading)return <div className="loading-page"><span className="spinner"/></div>;if(!user)return <Navigate to="/login" replace/>;return <>{children}</>}
+function Protected({children}:{children:ReactNode}){const {user,loading}=useAuth();if(loading)return <div className="loading-page"><span className="spinner"/></div>;if(!user)return <Navigate to="/login" replace/>;return <Fragment key={user.id}>{children}</Fragment>}
 
-function AppShell({children}:{children:ReactNode}){const {user,logout}=useAuth(),nav=useNavigate(),[open,setOpen]=useState(false);const signOut=async()=>{await logout();nav('/')};return <div className="app-shell"><aside className={`sidebar ${open?'open':''}`}><Logo/><button className="mobile-close" onClick={()=>setOpen(false)}><X/></button><nav>{[['/dashboard','Tổng quan',LayoutDashboard],['/tasks','Công việc của tôi',ClipboardList],['/assistant','TaskFlow AI',Bot],['/categories','Danh mục',FolderKanban],['/profile','Hồ sơ',UserRound]].map(([p,l,I]:any)=><NavLink key={p} to={p} onClick={()=>setOpen(false)}><I/><span>{l}</span></NavLink>)}</nav><div className="sidebar-bottom"><NavLink to="/profile"><Settings/><span>Cài đặt</span></NavLink><button onClick={signOut}><LogOut/><span>Đăng xuất</span></button></div></aside>{open&&<button className="drawer-backdrop" onClick={()=>setOpen(false)} aria-label="Đóng menu"/>}<div className="app-main"><header className="topbar"><button className="menu-button" onClick={()=>setOpen(true)}><Menu/></button><div className="top-search"><Search/><input aria-label="Tìm kiếm công việc" placeholder="Tìm kiếm công việc..." onKeyDown={e=>{if(e.key==='Enter')nav('/tasks?search='+encodeURIComponent((e.target as HTMLInputElement).value))}}/></div><button className="btn compact" onClick={()=>nav('/tasks?new=1')}><Plus/><span>Công việc</span></button><Bell className="bell"/><div className="avatar">{user?.name?.[0]?.toUpperCase()}</div></header><main className="content">{children}</main></div></div>}
+function AppShell({children}:{children:ReactNode}){const {user,logout}=useAuth(),nav=useNavigate(),[open,setOpen]=useState(false);const signOut=async()=>{try{await logout();nav('/login',{replace:true})}catch(err:any){toast.error(err.message)}};return <div className="app-shell"><aside className={`sidebar ${open?'open':''}`}><Logo/><button className="mobile-close" onClick={()=>setOpen(false)}><X/></button><nav>{[['/dashboard','Tổng quan',LayoutDashboard],['/tasks','Công việc của tôi',ClipboardList],['/assistant','TaskFlow AI',Bot],['/categories','Danh mục',FolderKanban],['/profile','Hồ sơ',UserRound]].map(([p,l,I]:any)=><NavLink key={p} to={p} onClick={()=>setOpen(false)}><I/><span>{l}</span></NavLink>)}</nav><div className="sidebar-bottom"><NavLink to="/profile"><Settings/><span>Cài đặt</span></NavLink><NavLink to="/login"><Repeat2/><span>Chuyển tài khoản</span></NavLink><button onClick={signOut}><LogOut/><span>Đăng xuất</span></button></div></aside>{open&&<button className="drawer-backdrop" onClick={()=>setOpen(false)} aria-label="Đóng menu"/>}<div className="app-main"><header className="topbar"><button className="menu-button" onClick={()=>setOpen(true)}><Menu/></button><div className="top-search"><Search/><input aria-label="Tìm kiếm công việc" placeholder="Tìm kiếm công việc..." onKeyDown={e=>{if(e.key==='Enter')nav('/tasks?search='+encodeURIComponent((e.target as HTMLInputElement).value))}}/></div><button className="btn compact" onClick={()=>nav('/tasks?new=1')}><Plus/><span>Công việc</span></button><Bell className="bell"/><div className="avatar">{user?.name?.[0]?.toUpperCase()}</div></header><main className="content">{children}</main></div></div>}
 
 function Dashboard(){
   const {user}=useAuth(),nav=useNavigate()
@@ -104,7 +130,7 @@ function Profile(){
   const {user,refresh,logout}=useAuth(),nav=useNavigate(),[name,setName]=useState(user?.name||''),[error,setError]=useState(''),[busy,setBusy]=useState(false)
   useEffect(()=>setName(user?.name||''),[user])
   const save=async(e:any)=>{e.preventDefault();setBusy(true);setError('');try{await api('/api/profile',{method:'PATCH',body:JSON.stringify({name})});await refresh();toast.success('Đã cập nhật hồ sơ')}catch(e:any){setError(e.message)}finally{setBusy(false)}}
-  const signOut=async()=>{await logout();nav('/')}
+  const signOut=async()=>{try{await logout();nav('/login',{replace:true})}catch(err:any){toast.error(err.message)}}
   return <><div className="page-heading"><div><h1>Hồ sơ cá nhân</h1><p>Thông tin tài khoản và tùy chỉnh.</p></div></div><section className="profile-card"><div className="profile-avatar">{user?.name?.[0]?.toUpperCase()}</div><div className="profile-info"><h2>{user?.name}</h2><p>{user?.email}</p><small>Thành viên từ {user?.created_at?new Date(user.created_at).toLocaleDateString('vi-VN'):''}</small></div></section><form className="profile-form" onSubmit={save}><h2>Thông tin hiển thị</h2><label>Tên hiển thị<input value={name} onChange={e=>setName(e.target.value)} minLength={2} maxLength={80}/></label><label>Email<input value={user?.email||''} disabled/></label>{error&&<div className="form-error">{error}</div>}<button className="btn" disabled={busy}>Lưu thay đổi</button></form><button className="btn ghost logout-profile" onClick={signOut}><LogOut/> Đăng xuất</button></>
 }
 

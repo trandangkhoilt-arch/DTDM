@@ -1,4 +1,4 @@
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { HTTPException } from 'hono/http-exception'
 
@@ -49,12 +49,19 @@ async function tokenHash(token: string) {
   return toBase64(new Uint8Array(digest))
 }
 
-async function createSession(c: Parameters<typeof app.get>[1] extends never ? any : any, userId: string) {
+async function createSession(c: Context<AppEnv>, userId: string) {
   const token = toBase64(crypto.getRandomValues(new Uint8Array(32))).replaceAll('+', '-').replaceAll('/', '_')
   const sessionId = uuid()
   const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-  await c.env.DB.prepare('INSERT INTO sessions (id,user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?,?)')
-    .bind(sessionId, userId, await tokenHash(token), expires, now()).run()
+  const insert = c.env.DB.prepare('INSERT INTO sessions (id,user_id,token_hash,expires_at,created_at) VALUES (?,?,?,?,?)')
+    .bind(sessionId, userId, await tokenHash(token), expires, now())
+  const previousToken = getCookie(c, 'taskflow_session')
+  if (previousToken) {
+    const revoke = c.env.DB.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await tokenHash(previousToken))
+    await c.env.DB.batch([insert, revoke])
+  } else {
+    await insert.run()
+  }
   setCookie(c, 'taskflow_session', token, {
     httpOnly: true,
     secure: c.req.url.startsWith('https://'),
@@ -88,6 +95,11 @@ app.use('/api/*', async (c, next) => {
     ).bind(await tokenHash(token), expires).first<{ user_id: string }>()
     if (row) c.set('userId', row.user_id)
   }
+  await next()
+})
+
+app.use('/api/auth/*', async (c, next) => {
+  c.header('Cache-Control', 'no-store')
   await next()
 })
 
