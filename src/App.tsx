@@ -1,7 +1,7 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
 import { BrowserRouter, Link, Navigate, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Toaster, toast } from 'sonner'
-import { BarChart3, Bell, Bot, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
+import { BarChart3, Bell, Bot, Check, CheckCircle2, ClipboardList, FolderKanban, LayoutDashboard, LogOut, Menu, MessageSquareText, Plus, Search, Send, Settings, Sparkles, Trash2, UserRound, X } from 'lucide-react'
 
 type User = { id:string; name:string; email:string; created_at:string }
 type Task = { id:string; title:string; description?:string; status:'TODO'|'IN_PROGRESS'|'DONE'; priority:'LOW'|'MEDIUM'|'HIGH'; due_at?:string; category_id?:string; category_name?:string; category_color?:string; subtasks?:Subtask[] }
@@ -119,7 +119,8 @@ type AssistantAction = {
   category_name?:string|null
   subtasks?:string[]
 }
-type ChatMessage = {id:string;role:'user'|'assistant';content:string}
+type ChatMessage = {id:string;role:'user'|'assistant';content:string;actions?:AssistantAction[];proposal_status?:'pending'|'confirmed'|'dismissed'|null}
+type AssistantConversation = {id:string;title:string;updated_at:string;message_count:number}
 
 function assistantActionDetails(action:AssistantAction){
   if(action.type==='create_task')return [
@@ -140,51 +141,152 @@ function assistantActionDetails(action:AssistantAction){
 function AssistantPage(){
   const {user}=useAuth()
   const [messages,setMessages]=useState<ChatMessage[]>([{id:'welcome',role:'assistant',content:`Xin chào ${user?.name||'bạn'}! Mình có thể tra cứu công việc, lập kế hoạch hoặc chia nhỏ nhiệm vụ. Mọi thay đổi sẽ cần bạn xác nhận trước khi lưu.`}])
+  const [conversations,setConversations]=useState<AssistantConversation[]>([])
+  const [conversationId,setConversationId]=useState<string|null>(null)
+  const [pendingMessageId,setPendingMessageId]=useState<string|null>(null)
+  const [historyLoading,setHistoryLoading]=useState(true)
   const [input,setInput]=useState('')
   const [pending,setPending]=useState<AssistantAction[]>([])
   const [busy,setBusy]=useState(false)
   const [saving,setSaving]=useState(false)
   const [error,setError]=useState('')
   const [modelLabel,setModelLabel]=useState(import.meta.env.DEV?'Ollama · qwen2.5:3b':'Workers AI · gpt-oss-20b')
+  const selectionKey = `taskflow:assistant:conversation:${user?.id}`
+  const selectConversation=useCallback((id:string|null)=>{
+    setConversationId(id)
+    try{
+      if(id)localStorage.setItem(selectionKey,id)
+      else localStorage.removeItem(selectionKey)
+    }catch{}
+  },[selectionKey])
+  const restoreMessages=(saved:ChatMessage[])=>{
+    setMessages(saved)
+    const proposal=saved.findLast(item=>item.proposal_status==='pending'&&item.actions?.length)
+    setPending(proposal?.actions||[])
+    setPendingMessageId(proposal?.id||null)
+  }
+  useEffect(()=>{
+    let active=true
+    const load=async()=>{
+      try{
+        const result=await api('/api/assistant/conversations')
+        if(!active)return
+        const history:AssistantConversation[]=result.conversations
+        setConversations(history)
+        let remembered:string|null=null
+        try{remembered=localStorage.getItem(selectionKey)}catch{}
+        const selected=history.find(item=>item.id===remembered)||history[0]
+        if(selected){
+          const saved=await api(`/api/assistant/conversations/${selected.id}/messages`)
+          if(!active)return
+          selectConversation(selected.id)
+          restoreMessages(saved.messages)
+        }
+      }catch(err:any){if(active)setError(err.message)}
+      finally{if(active)setHistoryLoading(false)}
+    }
+    void load()
+    return()=>{active=false}
+  },[selectionKey,selectConversation])
+  const blocked=historyLoading||busy||saving
+  const openConversation=async(id:string)=>{
+    if(blocked)return
+    setBusy(true);setError('')
+    try{
+      const result=await api(`/api/assistant/conversations/${id}/messages`)
+      selectConversation(id)
+      restoreMessages(result.messages)
+      setInput('')
+    }catch(err:any){setError(err.message)}
+    finally{setBusy(false)}
+  }
+  const startConversation=()=>{
+    selectConversation(null);setPending([]);setPendingMessageId(null);setError('');setInput('')
+    setMessages([{id:'welcome',role:'assistant',content:`Xin chào ${user?.name||'bạn'}! Mình có thể tra cứu công việc, lập kế hoạch hoặc chia nhỏ nhiệm vụ. Mọi thay đổi sẽ cần bạn xác nhận trước khi lưu.`}])
+  }
   const sendMessage=async(text:string)=>{
     const message=text.trim()
-    if(!message||busy)return
-    const previous=messages.filter(item=>item.id!=='welcome').map(({role,content})=>({role,content}))
-    const next=[...messages,{id:crypto.randomUUID(),role:'user' as const,content:message}]
-    setMessages(next);setInput('');setPending([]);setError('');setBusy(true)
+    if(!message||blocked)return
+    setBusy(true);setError('')
+    let id=conversationId
+    const temporaryId=crypto.randomUUID()
     try{
-      const result=await api('/api/assistant/chat',{method:'POST',body:JSON.stringify({message,history:previous})})
+      if(!id){
+        const {conversation}=await api('/api/assistant/conversations',{method:'POST',body:JSON.stringify({title:message})})
+        id=conversation.id as string
+        selectConversation(id)
+        setConversations(items=>[{...conversation,message_count:0},...items])
+      }
+      setMessages(items=>[...items.filter(item=>item.id!=='welcome'),{id:temporaryId,role:'user',content:message}])
+      setInput('')
+      const result=await api('/api/assistant/chat',{method:'POST',body:JSON.stringify({message,conversation_id:id})})
       setModelLabel(result.provider==='workers-ai'?`Workers AI · ${String(result.model).split('/').at(-1)}`:`Ollama · ${result.model}`)
-      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:result.reply}])
-      setPending(result.actions||[])
+      const actions:AssistantAction[]=result.actions||[]
+      setMessages(items=>[
+        ...items.map(item=>item.id===temporaryId
+          ? {...item,id:result.user_message_id}
+          : actions.length&&item.proposal_status==='pending' ? {...item,proposal_status:'dismissed' as const} : item),
+        {id:result.assistant_message_id,role:'assistant',content:result.reply,actions,proposal_status:actions.length?'pending':null},
+      ])
+      if(actions.length){
+        setPending(actions)
+        setPendingMessageId(result.assistant_message_id)
+      }
     }catch(err:any){
-      setError(err.message)
-      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:'Mình chưa thể xử lý yêu cầu. Hãy kiểm tra dịch vụ AI đang hoạt động rồi thử lại.'}])
-    }finally{setBusy(false)}
+      setError(err instanceof TypeError&&/fetch|load failed/i.test(err.message)
+        ?'Không thể kết nối máy chủ TaskFlow. Hãy kiểm tra ứng dụng đang chạy rồi thử lại.'
+        :err.message)
+      if(id){
+        try{
+          const saved=await api(`/api/assistant/conversations/${id}/messages`)
+          restoreMessages(saved.messages)
+        }catch{}
+      }
+    }finally{
+      if(id){
+        try{
+          const result=await api('/api/assistant/conversations')
+          setConversations(result.conversations)
+        }catch{}
+      }
+      setBusy(false)
+    }
   }
   const confirmActions=async()=>{
-    if(!pending.length||saving)return
+    if(!pending.length||!pendingMessageId||blocked)return
     setSaving(true);setError('')
     try{
-      const result=await api('/api/assistant/actions',{method:'POST',body:JSON.stringify({confirmed:true,actions:pending})})
+      const result=await api('/api/assistant/actions',{method:'POST',body:JSON.stringify({confirmed:true,actions:pending,assistant_message_id:pendingMessageId})})
       const count=result.saved?.length||pending.length
       setPending([])
-      setMessages(items=>[...items,{id:crypto.randomUUID(),role:'assistant',content:`Đã lưu ${count} thay đổi vào danh sách công việc của bạn.`}])
+      setPendingMessageId(null)
+      setMessages(items=>items.map(item=>item.id===pendingMessageId?{...item,proposal_status:'confirmed'}:item))
       toast.success(`Đã lưu ${count} đề xuất`)
-    }catch(err:any){setError(err.message);toast.error(err.message)}
+    }catch(err:any){setError(err.message)}
+    finally{setSaving(false)}
+  }
+  const dismissProposal=async()=>{
+    if(!conversationId||!pendingMessageId||blocked)return
+    setSaving(true);setError('')
+    try{
+      await api(`/api/assistant/conversations/${conversationId}/messages/${pendingMessageId}`,{method:'PATCH',body:JSON.stringify({proposal_status:'dismissed'})})
+      setMessages(items=>items.map(item=>item.id===pendingMessageId?{...item,proposal_status:'dismissed'}:item))
+      setPending([])
+      setPendingMessageId(null)
+    }catch(err:any){setError(err.message)}
     finally{setSaving(false)}
   }
   const examples=['Tóm tắt công việc sắp đến hạn của tôi','Lập kế hoạch ôn thi trong 7 ngày','Chia nhỏ công việc báo cáo Cloudflare']
   return <section className="assistant-page">
     <header className="assistant-heading"><div className="assistant-heading-icon"><Sparkles/></div><div><span className="eyebrow">TASKFLOW AI ASSISTANT</span><h1>Trợ lý công việc của bạn</h1><p>AI hỗ trợ lập kế hoạch · dữ liệu riêng trong TaskFlow</p></div><span className="assistant-model"><i/> {modelLabel}</span></header>
     <div className="assistant-disclaimer"><Bot size={17}/><span>AI chỉ đọc công việc thuộc tài khoản của bạn. Mọi đề xuất tạo hoặc sửa chỉ được ghi vào D1 sau khi bạn xác nhận.</span></div>
-    <div className="assistant-chat">
-      <div className="assistant-messages" aria-live="polite">{messages.map(item=><div className={`chat-message ${item.role}`} key={item.id}><span className="chat-avatar">{item.role==='assistant'?<Sparkles size={16}/>:user?.name?.[0]?.toUpperCase()}</span><div className="chat-bubble"><span className="chat-sender">{item.role==='assistant'?'TaskFlow AI':'Bạn'}</span><p>{item.content}</p></div></div>)}{busy&&<div className="chat-message assistant"><span className="chat-avatar"><Sparkles size={16}/></span><div className="chat-bubble"><span className="chat-sender">TaskFlow AI</span><p className="typing-indicator"><i/><i/><i/> Đang suy nghĩ…</p></div></div>}</div>
-      {!pending.length&&messages.length===1&&<div className="assistant-suggestions">{examples.map(text=><button key={text} onClick={()=>sendMessage(text)}>{text}<span>→</span></button>)}</div>}
-      {!!pending.length&&<section className="proposal-card"><div className="proposal-heading"><div><Sparkles size={18}/><div><b>Đề xuất chờ xác nhận</b><small>{pending.length} thay đổi · chưa được lưu</small></div></div><button className="proposal-dismiss" onClick={()=>setPending([])} aria-label="Hủy đề xuất"><X size={18}/></button></div><div className="proposal-list">{pending.map((action,index)=><article className="proposal-item" key={`${action.type}-${action.task_id||index}-${index}`}><span className={`proposal-kind ${action.type}`}>{action.type==='create_task'?'Tạo mới':'Cập nhật'}</span><div><b>{action.type==='update_task'&&action.title!==action.previous_title?`Đổi tên: ${action.title}`:action.title}</b><small>{assistantActionDetails(action).join(' · ')}</small>{action.subtasks?.length?<ul>{action.subtasks.map((task,index)=><li key={`${task}-${index}`}>{task}</li>)}</ul>:null}</div>{action.priority&&<span className={`priority ${action.priority.toLowerCase()}`}>{action.priority==='HIGH'?'Cao':action.priority==='LOW'?'Thấp':'Trung bình'}</span>}</article>)}</div><div className="proposal-footer"><span>Chỉ bấm xác nhận nếu nội dung đúng ý bạn.</span><button className="btn" onClick={confirmActions} disabled={saving}>{saving?'Đang lưu…':<><Check size={17}/> Xác nhận và lưu</>}</button></div></section>}
+    <div className="assistant-layout"><aside className="assistant-history"><button className="assistant-new-chat" onClick={startConversation} disabled={blocked}><Plus size={16}/> Cuộc trò chuyện mới</button><span className="assistant-history-label">LỊCH SỬ TRÒ CHUYỆN</span>{historyLoading?<div className="assistant-history-empty">Đang tải…</div>:conversations.length?conversations.map(item=><button key={item.id} className={`assistant-history-item ${conversationId===item.id?'active':''}`} onClick={()=>openConversation(item.id)} disabled={blocked}><MessageSquareText size={16}/><span><b>{item.title}</b><small>{new Date(item.updated_at).toLocaleString('vi-VN',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'})} · {item.message_count} tin nhắn</small></span></button>):<div className="assistant-history-empty">Các cuộc trò chuyện của bạn sẽ hiển thị ở đây.</div>}</aside><div className="assistant-chat">
+      <div className="assistant-messages" aria-live="polite">{messages.map(item=><div className={`chat-message ${item.role}`} key={item.id}><span className="chat-avatar">{item.role==='assistant'?<Sparkles size={16}/>:user?.name?.[0]?.toUpperCase()}</span><div className="chat-bubble"><span className="chat-sender">{item.role==='assistant'?'TaskFlow AI':'Bạn'}</span><p>{item.content}</p>{item.actions?.length?<div className="chat-proposal-history"><span className={`proposal-history-status ${item.proposal_status||'pending'}`}>{item.proposal_status==='confirmed'?'Đã xác nhận và lưu':item.proposal_status==='dismissed'?'Đã hủy':'Đề xuất chờ xác nhận'}</span>{item.actions.map((action,index)=><div key={`${action.title}-${index}`}><b>{action.title}</b>{action.subtasks?.length?<ul>{action.subtasks.map((subtask,subIndex)=><li key={`${subtask}-${subIndex}`}>{subtask}</li>)}</ul>:null}</div>)}</div>:null}</div></div>)}{busy&&<div className="chat-message assistant"><span className="chat-avatar"><Sparkles size={16}/></span><div className="chat-bubble"><span className="chat-sender">TaskFlow AI</span><p className="typing-indicator"><i/><i/><i/> Đang suy nghĩ…</p></div></div>}</div>
+      {!pending.length&&messages.length===1&&<div className="assistant-suggestions">{examples.map(text=><button key={text} disabled={blocked} onClick={()=>sendMessage(text)}>{text}<span>→</span></button>)}</div>}
+      {!!pending.length&&<section className="proposal-card"><div className="proposal-heading"><div><Sparkles size={18}/><div><b>Đề xuất chờ xác nhận</b><small>{pending.length} thay đổi · chưa được lưu</small></div></div><button className="proposal-dismiss" onClick={dismissProposal} disabled={blocked} aria-label="Hủy đề xuất"><X size={18}/></button></div><div className="proposal-list">{pending.map((action,index)=><article className="proposal-item" key={`${action.type}-${action.task_id||index}-${index}`}><span className={`proposal-kind ${action.type}`}>{action.type==='create_task'?'Tạo mới':'Cập nhật'}</span><div><b>{action.type==='update_task'&&action.title!==action.previous_title?`Đổi tên: ${action.title}`:action.title}</b><small>{assistantActionDetails(action).join(' · ')}</small>{action.subtasks?.length?<ul>{action.subtasks.map((task,index)=><li key={`${task}-${index}`}>{task}</li>)}</ul>:null}</div>{action.priority&&<span className={`priority ${action.priority.toLowerCase()}`}>{action.priority==='HIGH'?'Cao':action.priority==='LOW'?'Thấp':'Trung bình'}</span>}</article>)}</div><div className="proposal-footer"><span>Chỉ bấm xác nhận nếu nội dung đúng ý bạn.</span><button className="btn" onClick={confirmActions} disabled={blocked}>{saving?'Đang lưu…':<><Check size={17}/> Xác nhận và lưu</>}</button></div></section>}
       {error&&<div className="assistant-error" role="alert">{error}<button onClick={()=>setError('')} aria-label="Đóng"><X size={16}/></button></div>}
-      <form className="assistant-composer" onSubmit={event=>{event.preventDefault();void sendMessage(input)}}><textarea value={input} onChange={event=>setInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();void sendMessage(input)}}} placeholder="Hỏi về công việc hoặc mô tả kế hoạch của bạn…" maxLength={3000} rows={2} aria-label="Tin nhắn cho TaskFlow AI"/><div><small>Enter để gửi · Shift+Enter xuống dòng</small><button className="btn" disabled={busy||!input.trim()} aria-label="Gửi tin nhắn"><Send size={17}/><span>Gửi</span></button></div></form>
-    </div>
+      <form className="assistant-composer" onSubmit={event=>{event.preventDefault();void sendMessage(input)}}><textarea value={input} onChange={event=>setInput(event.target.value)} onKeyDown={event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();void sendMessage(input)}}} placeholder="Hỏi về công việc hoặc mô tả kế hoạch của bạn…" maxLength={3000} rows={2} aria-label="Tin nhắn cho TaskFlow AI"/><div><small>Enter để gửi · Shift+Enter xuống dòng</small><button className="btn" disabled={blocked||!input.trim()} aria-label="Gửi tin nhắn"><Send size={17}/><span>Gửi</span></button></div></form>
+    </div></div>
   </section>
 }
 

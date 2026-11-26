@@ -113,7 +113,61 @@ describe('TaskFlow AI Worker routes', () => {
     expect(ollamaRequest?.model).toBe('qwen2.5:3b')
   })
 
-  it('uses Workers AI structured JSON to prepare task proposals', async () => {
+  it('continues a task plan when the user answers a clarification question', async () => {
+    let ollamaRequest: Record<string, any> | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      ollamaRequest = JSON.parse(String(init?.body))
+      return Response.json({
+        message: {
+          content: 'Mình đã chia kế hoạch học tiếng Trung thành các bước.',
+          tool_calls: [{
+            function: {
+              name: 'propose_create_task',
+              arguments: { title: 'Học tiếng Trung', description: 'Ôn tập trong 3 ngày', priority: 'MEDIUM', due_at: '', category_name: 'Học tập', subtasks: ['Ngày 1: luyện viết', 'Ngày 2: ôn từ vựng', 'Ngày 3: luyện tập tổng hợp'] },
+            },
+          }],
+        },
+      })
+    }))
+
+    const response = await request('/api/assistant/chat', new FakeD1(), {
+      authenticated: true,
+      body: {
+        message: 'Tôi cần học 4 giờ tiếng Trung',
+        history: [
+          { role: 'user', content: 'Tôi cần lập kế hoạch học tập trong 3 ngày' },
+          { role: 'assistant', content: 'Bạn muốn học nội dung gì và dành bao nhiêu giờ mỗi ngày?' },
+        ],
+      },
+    })
+    const result = await response.json() as { actions: Array<{ title: string; subtasks: string[] }> }
+
+    expect(response.status).toBe(200)
+    expect(ollamaRequest?.tools).toHaveLength(3)
+    expect(ollamaRequest?.tools[0].function.name).toBe('propose_create_task')
+    expect(result.actions).toEqual([expect.objectContaining({ title: 'Học tiếng Trung', subtasks: ['Ngày 1: luyện viết', 'Ngày 2: ôn từ vựng', 'Ngày 3: luyện tập tổng hợp'] })])
+  })
+
+  it('answers general problem-solving questions without proposing task changes', async () => {
+    let ollamaRequest: Record<string, any> | undefined
+    vi.stubGlobal('fetch', vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      ollamaRequest = JSON.parse(String(init?.body))
+      return Response.json({ message: { content: 'Hãy bắt đầu bằng cách chọn một việc quan trọng nhất và chia nó thành bước nhỏ.' } })
+    }))
+
+    const response = await request('/api/assistant/chat', new FakeD1(), {
+      authenticated: true,
+      body: { message: 'Tôi đang quá tải, nên bắt đầu giải quyết thế nào?' },
+    })
+    const result = await response.json() as { reply: string; actions: unknown[] }
+
+    expect(response.status).toBe(200)
+    expect(ollamaRequest?.tools).toHaveLength(3)
+    expect(result.reply).toContain('chia nó thành bước nhỏ')
+    expect(result.actions).toEqual([])
+  })
+
+  it('accepts a Workers AI proposal for an implicit request with no due date', async () => {
     const db = new FakeD1()
     let modelName = ''
     let maxTokens: number | undefined
@@ -131,7 +185,6 @@ describe('TaskFlow AI Worker routes', () => {
                   title: 'Tạo từ Workers AI',
                   description: 'Đề xuất',
                   priority: 'MEDIUM',
-                  due_at: '',
                   category_name: '',
                   subtasks: ['Bước một', 'Bước hai', 'Bước ba', 'Bước bốn', 'Bước năm', 'Bước sáu', 'Bước bảy'],
                 }],
@@ -145,15 +198,15 @@ describe('TaskFlow AI Worker routes', () => {
     const response = await request('/api/assistant/chat', db, {
       authenticated: true,
       ai,
-      body: { message: 'Tạo task mới' },
+      body: { message: 'Tuần này mình cần chuẩn bị cho buổi thuyết trình' },
     })
-    const result = await response.json() as { actions: Array<{ title: string }>; provider: string; model: string }
+    const result = await response.json() as { actions: Array<{ title: string; subtasks: string[] }>; provider: string; model: string }
 
     expect(response.status).toBe(200)
     expect(result).toMatchObject({
       provider: 'workers-ai',
       model: '@cf/openai/gpt-oss-20b',
-      actions: [expect.objectContaining({ title: 'Tạo từ Workers AI' })],
+      actions: [expect.objectContaining({ title: 'Tạo từ Workers AI', due_at: null })],
     })
     expect(modelName).toBe('@cf/openai/gpt-oss-20b')
     expect(ai.run.mock.calls[0][1].tools).toBeUndefined()
@@ -199,6 +252,53 @@ describe('TaskFlow AI Worker routes', () => {
     ])
     expect(result.actions[0]).not.toHaveProperty('due_at')
     expect(result.actions[0]).not.toHaveProperty('category_id')
+  })
+
+  it('reopens a saved conversation and uses its pending proposal for a follow-up', async () => {
+    const savedActions = [{ type: 'create_task', title: 'Chuẩn bị thuyết trình', subtasks: ['Soạn dàn ý'] }]
+    const savedProposal = {
+      id: 'proposal-a', role: 'assistant', content: 'Đây là bản nháp.',
+      proposal_status: 'pending', actions_json: JSON.stringify(savedActions), created_at: '2026-11-26T00:00:00Z',
+    }
+    const db = new FakeD1()
+    const first = db.first.bind(db)
+    const all = db.all.bind(db)
+    vi.spyOn(db, 'first').mockImplementation(async (statement) => {
+      if (statement.sql.includes('FROM assistant_conversations')) {
+        return statement.values[0] === 'conversation-a' && statement.values[1] === 'user-a' ? { id: 'conversation-a' } : null
+      }
+      return first(statement)
+    })
+    vi.spyOn(db, 'all').mockImplementation(async (statement) => {
+      if (statement.sql.includes('FROM assistant_messages')) return { results: [savedProposal] }
+      return all(statement)
+    })
+    const reopened = await request('/api/assistant/conversations/conversation-a/messages', db, { authenticated: true })
+    expect(reopened.status).toBe(200)
+    expect(await reopened.json()).toMatchObject({ messages: [{ id: 'proposal-a', actions: savedActions, proposal_status: 'pending' }] })
+
+    const ai = {
+      run: vi.fn(async (_model: string, _input: { messages: { role: string; content: string }[] }) => ({
+        response: JSON.stringify({
+          reply: 'Mình đã thêm bước tập dượt.',
+          actions: [{ ...savedActions[0], subtasks: ['Soạn dàn ý', 'Tập dượt'] }],
+        }),
+      })),
+    }
+    const continued = await request('/api/assistant/chat', db, {
+      authenticated: true, ai, body: { conversation_id: 'conversation-a', message: 'Thêm bước tập dượt' },
+    })
+    expect(continued.status).toBe(200)
+    expect(ai.run.mock.calls[0][1].messages).toContainEqual({
+      role: 'assistant', content: expect.stringContaining(JSON.stringify(savedActions)),
+    })
+    expect(await continued.json()).toMatchObject({
+      conversation_id: 'conversation-a', actions: [{ title: 'Chuẩn bị thuyết trình', subtasks: ['Soạn dàn ý', 'Tập dượt'] }],
+    })
+    expect(db.batches[0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sql: expect.stringContaining("SET proposal_status='dismissed'"), values: ['conversation-a'] }),
+      expect.objectContaining({ sql: expect.stringContaining('INSERT INTO assistant_messages') }),
+    ]))
   })
 
   it('rejects applying an AI proposal unless the user confirms', async () => {
